@@ -1,4 +1,4 @@
-# Gradio web app that unifies BLIP, OWL-ViT, SmolVLM, and TinyCLIP
+# Gradio web app that unifies BLIP, InstructBLIP, SmolVLM, LLaVA, OWL-ViT, and TinyCLIP
 # Upload an image, pick a model, run inference
 
 import gradio as gr
@@ -11,17 +11,20 @@ from transformers import (
     Blip2Processor, Blip2ForConditionalGeneration,
     OwlViTProcessor, OwlViTForObjectDetection,
     AutoProcessor, AutoModelForVision2Seq,
-    CLIPProcessor, CLIPModel
+    CLIPProcessor, CLIPModel,
+    LlavaProcessor, LlavaForConditionalGeneration
 )
 
 # Device
 # Avoid accelerate/meta-device crash by not calling .to(device) on offloaded models
 # Use model-specific device handling
 
-# Load Models
+# ============================================ Load Models ============================================================
 blip_processor, blip_model = None, None
-owlvit_processor, owlvit_model = None, None
+iblip_processor, iblip_model = None, None
 smol_processor, smol_model = None, None
+llava_processor, llava_model = None, None
+owlvit_processor, owlvit_model = None, None
 tclip_processor, tclip_model = None, None
 
 def load_blip():
@@ -39,6 +42,16 @@ def load_owlvit():
         owlvit_model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
         owlvit_model = owlvit_model.to("cuda" if torch.cuda.is_available() else "cpu")
 
+def load_instructblip():
+    global iblip_processor, iblip_model
+    if iblip_processor is None:
+        iblip_processor = AutoProcessor.from_pretrained("Salesforce/instructblip-flan-t5-xl")
+        iblip_model = AutoModelForVision2Seq.from_pretrained(
+            "Salesforce/instructblip-flan-t5-xl",
+            device_map="auto",
+            torch_dtype=torch.float16
+        )
+
 def load_smolvlm():
     global smol_processor, smol_model
     if smol_processor is None:
@@ -48,6 +61,15 @@ def load_smolvlm():
             torch_dtype=torch.float32
         ).to("cpu")
 
+def load_llava():
+    global llava_processor, llava_model
+    if llava_processor is None:
+        llava_processor = LlavaProcessor.from_pretrained("llava-hf/llava-1.5-7b-hf")
+        llava_model = LlavaForConditionalGeneration.from_pretrained(
+            "llava-hf/llava-1.5-7b-hf",
+            device_map="auto"
+        )
+
 def load_tinyclip():
     global tclip_processor, tclip_model
     if tclip_processor is None:
@@ -55,7 +77,7 @@ def load_tinyclip():
         tclip_model = CLIPModel.from_pretrained("laion/TinyCLIP-ViT-Tiny-patch16-224")
         tclip_model = tclip_model.to("cuda" if torch.cuda.is_available() else "cpu")
 
-# Inference
+# ======================================== Inference ==================================================================
 
 def blip_infer(image, question):
     load_blip()
@@ -66,6 +88,15 @@ def blip_infer(image, question):
         generated_ids = blip_model.generate(**inputs, max_new_tokens=50)
     return blip_processor.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
 
+def iblip_infer(image, question):
+    load_instructblip()
+    inputs = iblip_processor(images=image, text=question, return_tensors="pt")
+    device = next(iblip_model.parameters()).device
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.no_grad():
+        generated_ids = iblip_model.generate(**inputs, max_new_tokens=50)
+    return iblip_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
 def smol_infer(image, question):
     load_smolvlm()
     messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": question}]}]
@@ -74,6 +105,15 @@ def smol_infer(image, question):
     with torch.no_grad():
         generated_ids = smol_model.generate(**inputs, max_new_tokens=200)
     return smol_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+def llava_infer(image, question):
+    load_llava()
+    inputs = llava_processor(images=image, text=question, return_tensors="pt")
+    device = next(llava_model.parameters()).device
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.no_grad():
+        generated_ids = llava_model.generate(**inputs, max_new_tokens=50)
+    return llava_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
 def owlvit_infer(image, prompt_str):
     load_owlvit()
@@ -109,8 +149,12 @@ def tinyclip_infer(image, label_str):
 def run(model, size, image, prompt):
     if model == "BLIP-2":
         return blip_infer(image, prompt)
+    elif model == "InstructBLIP":
+        return iblip_infer(image, prompt)
     elif model == "SmolVLM":
         return smol_infer(image, prompt)
+    elif model == "LLaVA":
+        return llava_infer(image, prompt)
     elif model == "OWL-ViT":
         return owlvit_infer(image, prompt)
     elif model == "TinyCLIP":
@@ -122,7 +166,7 @@ with gr.Blocks() as demo:
     with gr.Row():
         image_input = gr.Image(type="pil")
         model_choice = gr.Dropdown(
-            ["BLIP-2", "SmolVLM", "OWL-ViT", "TinyCLIP"],
+            ["BLIP-2", "InstructBLIP", "SmolVLM", "LLaVA", "OWL-ViT", "TinyCLIP"],
             label="Model Type",
             value="BLIP-2"
         )
@@ -132,7 +176,9 @@ with gr.Blocks() as demo:
                     choices=[
                         "Salesforce/blip2-opt-2.7b",
                         "Salesforce/blip2-flan-t5-xl",
+                        "Salesforce/instructblip-flan-t5-xl",
                         "HuggingFaceTB/SmolVLM-Instruct",
+                        "llava-hf/llava-1.5-7b-hf",
                         "google/owlvit-base-patch32",
                         "HuggingFaceM4/tiny-clip-vit-small-patch16"
                     ],
@@ -148,23 +194,17 @@ with gr.Blocks() as demo:
 
     # Dynamically update size options based on selected model
     def update_model_size(model_type):
-        if model_type == "BLIP-2":
-            return gr.update(choices=[
-                "", "Salesforce/blip2-opt-2.7b", "Salesforce/blip2-flan-t5-xl"
-            ])
-        elif model_type == "SmolVLM":
-            return gr.update(choices=[
-                "", "HuggingFaceTB/SmolVLM-Instruct"
-            ])
-        elif model_type == "OWL-ViT":
-            return gr.update(choices=[
-                "", "google/owlvit-base-patch32"
-            ])
-        elif model_type == "TinyCLIP":
-            return gr.update(choices=[
-                "", "HuggingFaceM4/tiny-clip-vit-small-patch16"
-            ])
-        return gr.update(choices=[])
+        options = {
+            "BLIP-2": ["", "Salesforce/blip2-opt-2.7b", "Salesforce/blip2-flan-t5-xl"],
+            "InstructBLIP": ["", "Salesforce/instructblip-flan-t5-xl"],
+            "SmolVLM": ["", "HuggingFaceTB/SmolVLM-Instruct"],
+            "LLaVA": ["", "llava-hf/llava-1.5-7b-hf"],
+            "OWL-ViT": ["", "google/owlvit-base-patch32"],
+            "TinyCLIP": ["", "HuggingFaceM4/tiny-clip-vit-small-patch16"],
+        }
+        if model_type in options:
+            return gr.update(choices=options[model_type], value="", interactive=True)
+        return gr.update(choices=[], value=None, interactive=False)
 
     model_choice.change(fn=update_model_size, inputs=model_choice, outputs=model_size)
 
