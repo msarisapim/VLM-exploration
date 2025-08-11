@@ -2,6 +2,9 @@
 
 VLM tester via Gradio webapp
 
+<img width="1288" height="942" alt="image" src="https://github.com/user-attachments/assets/7288efa9-1362-4fca-8b09-9bc1987018b8" />
+
+
 ## Structure
 ```
 vlm_app_srp/
