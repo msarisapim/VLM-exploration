@@ -37,8 +37,11 @@ def update_size_dropdown(model_name: str):
 
 def toggle_sliders(model_name: str):
     # โชว์ slider เฉพาะ Grounding
-    show_score = model_name in DEFAULT_SLIDERS["score_thr"]["visible_for"]
-    show_iou   = model_name in DEFAULT_SLIDERS["iou_thr"]["visible_for"]
+    # - score_thr: detector จริง ๆ (OWL-ViT, GroundingDINO)
+    # - iou_thr  : detector + PaliGemma (ใช้เป็น NMS IoU)
+    show_score = model_name in {"OWL-ViT", "GroundingDINO"}
+    show_iou   = model_name in {"OWL-ViT", "GroundingDINO", "PaliGemma"}
+
     s = gr.update(visible=show_score)
     i = gr.update(visible=show_iou)
     p = gr.update(value=DEFAULT_PROMPTS.get(model_name, ""))
@@ -117,9 +120,16 @@ with gr.Blocks() as demo:
     def run_infer(model_name, size_repo, image, prompt, score_thr, iou_thr):
         if image is None:
             import gradio as gr
-            raise gr.Error("กรุณาอัปโหลดรูปก่อน ✨")
+            raise gr.Error("Please upload the image first ✨")
         adapter = get_adapter(model_name)
-        params = {"size_repo": size_repo, "score_thr": score_thr, "iou_thr": iou_thr}
+        # ให้ Paligemma อ่าน nms_iou + apply_nms ได้ด้วย
+        params = {
+            "size_repo": size_repo,
+            "score_thr": score_thr,      # ใช้กับ OWL-ViT/GroundingDINO เท่านั้น
+            "iou_thr": iou_thr,          # เผื่อ detector อื่น ๆ
+            "nms_iou": iou_thr,          # << สำหรับ PaliGemma
+            "apply_nms": model_name in {"OWL-ViT", "GroundingDINO", "PaliGemma"},  # << เปิด NMS สำหรับ 3 ตัวนี้
+        }
         text, img = adapter.infer(image, prompt, params)
         return text or "", img
 

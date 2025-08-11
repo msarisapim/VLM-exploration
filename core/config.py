@@ -8,7 +8,7 @@ DEFAULT_PROMPTS = {
     "OWL-ViT": "ring, chain, pendant, bracelet, necklace, hand, tray, circle, earrings",
     "TinyCLIP": "ring, chain, pendant, bracelet, necklace, hand, tray, circle, earrings",
     "GroundingDINO": "ring, chain, pendant, bracelet, necklace, hand, tray, circle, earrings",
-    "PaliGemma": "caption",
+    "PaliGemma": "detect ring; pendant; bracelet; necklace; earrings", # segment, caption
     "Qwen2-VL": "Describe this image in detail.",
 }
 

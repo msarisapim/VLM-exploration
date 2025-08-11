@@ -17,22 +17,15 @@ LOC_TAG = re.compile(r"<loc(\d{4})>", flags=re.IGNORECASE)
 SEG_TAG = re.compile(r"<seg(\d{3})>", flags=re.IGNORECASE)
 
 def _scale1023(val: int, maxv: int) -> int:
-    """map loc (0..1023) -> pixel [0..maxv-1]"""
     v = max(0, min(1023, int(val)))
     return int(round(v / 1023.0 * max(1, (maxv - 1))))
 
 def _labels_from_prompt(prompt: str, mode: str) -> List[str]:
-    """
-    ดึง label จาก prompt
-    - mode == 'detect'  : รองรับ 'detect a; b; c' หรือคอมม่า
-    - mode == 'segment' : รองรับ 'segment a; b; c' หรือคอมม่า
-    """
     p = (prompt or "").strip()
     head = mode.lower().strip()
     if p.lower().startswith(head):
         p = p[len(head):].strip(": ").strip()
-    parts = [s.strip() for s in re.split(r"[;,]", p) if s.strip()]
-    return parts
+    return [s.strip() for s in re.split(r"[;,]", p) if s.strip()]
 
 def _build_prefixed_prompt(prompt: str, prefix: str, default_label: str = "object") -> Tuple[str, List[str]]:
     labels = _labels_from_prompt(prompt, prefix)
@@ -52,7 +45,6 @@ def _iou_xyxy(a, b):
     return inter / union
 
 def _nms_numpy(boxes, scores, iou_thr=0.5):
-    """NMS แบบ numpy (ใช้เมื่อไม่มี torchvision)"""
     idxs = np.argsort(scores)[::-1]
     keep = []
     while len(idxs) > 0:
@@ -65,8 +57,7 @@ def _nms_numpy(boxes, scores, iou_thr=0.5):
         idxs = np.array(rest, dtype=int)
     return keep
 
-def _nms_per_class(boxes, label_idx, scores, iou_thr=0.5):
-    """ทำ NMS แยกตามคลาส → รวมผลกลับ"""
+def _nms_per_class(boxes, label_idx, scores, iou_thr=0.5, return_indices: bool=False):
     try:
         from torchvision.ops import nms as torch_nms
         use_torch = True
@@ -77,9 +68,10 @@ def _nms_per_class(boxes, label_idx, scores, iou_thr=0.5):
     scores = np.asarray(scores, dtype=np.float32)
     label_idx = np.asarray(label_idx, dtype=np.int32)
 
-    kept_boxes, kept_labels, kept_scores = [], [], []
+    kept_boxes, kept_labels, kept_scores, kept_ids = [], [], [], []
     for cls in np.unique(label_idx):
         cls_mask = (label_idx == cls)
+        ids_this = np.nonzero(cls_mask)[0]
         b = boxes[cls_mask]
         s = scores[cls_mask]
         if len(b) == 0:
@@ -96,10 +88,66 @@ def _nms_per_class(boxes, label_idx, scores, iou_thr=0.5):
         kept_boxes.extend(b[keep].astype(np.int32).tolist())
         kept_scores.extend(s[keep].tolist())
         kept_labels.extend([int(cls)] * len(keep))
+        kept_ids.extend(ids_this[keep].tolist())
 
+    if return_indices:
+        return kept_boxes, kept_labels, kept_scores, kept_ids
     return kept_boxes, kept_labels, kept_scores
 
-# --- วาดกรอบโดยไม่ทำ NMS เพิ่มเติม (เราทำ NMS ไปแล้วข้างบน หากเปิดใช้) ---
+# --- dedup across labels (prefer fallback over main) ---
+def _dedup_across_labels(
+    boxes: List[List[int]],
+    label_idx: List[int],
+    scores: List[float],
+    source_flags: List[str],          # "main" | "fallback"
+    iou_thr: float = 0.85,
+    return_indices: bool = False,
+):
+    n = len(boxes)
+    keep = [True] * n
+    for i in range(n):
+        if not keep[i]:
+            continue
+        for j in range(i + 1, n):
+            if not keep[j]:
+                continue
+            if _iou_xyxy(boxes[i], boxes[j]) > iou_thr:
+                if label_idx[i] != label_idx[j]:
+                    # ข้ามคลาส → ให้สิทธิ์ fallback
+                    if   source_flags[i] == "fallback" and source_flags[j] == "main":
+                        keep[j] = False
+                    elif source_flags[j] == "fallback" and source_flags[i] == "main":
+                        keep[i] = False
+                    else:
+                        # ที่มาเดียวกัน → ดูคะแนน
+                        if scores[i] >= scores[j]:
+                            keep[j] = False
+                        else:
+                            keep[i] = False
+                else:
+                    # คลาสเดียวกัน → ดูคะแนน
+                    if scores[i] >= scores[j]:
+                        keep[j] = False
+                    else:
+                        keep[i] = False
+
+    idxs = [k for k, f in enumerate(keep) if f]
+    if return_indices:
+        return (
+            [boxes[k] for k in idxs],
+            [label_idx[k] for k in idxs],
+            [scores[k] for k in idxs],
+            [source_flags[k] for k in idxs],
+            idxs,
+        )
+    return (
+        [boxes[k] for k in idxs],
+        [label_idx[k] for k in idxs],
+        [scores[k] for k in idxs],
+        [source_flags[k] for k in idxs],
+    )
+
+# --- draw & overlay helpers ---
 def _draw_boxes_keep_all(image: Image.Image,
                          boxes: List[List[int]],
                          label_idx: List[int],
@@ -116,15 +164,40 @@ def _draw_boxes_keep_all(image: Image.Image,
         cv2.putText(img, text, (x0 + 4, y0 - 6), font, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
     return Image.fromarray(img)
 
+def _overlay_colored_masks(image: Image.Image,
+                           masks: List[Optional[np.ndarray]],
+                           label_idx: List[int],
+                           alpha: float = 0.40) -> Image.Image:
+    if not masks:
+        return image
+    canvas = np.array(image).astype(np.float32)
+
+    palette = [
+        (0, 255, 0),     # G
+        (0, 0, 255),     # R (BGR order)
+        (255, 0, 0),     # B
+        (0, 255, 255),   # Y
+        (255, 0, 255),   # M
+        (255, 255, 0),   # C
+    ]
+
+    for m, li in zip(masks, label_idx):
+        if m is None:
+            continue
+        color = palette[li % len(palette)]
+        mask = (m > 127).astype(np.float32)[..., None]
+        color_im = np.zeros_like(canvas)
+        color_im[..., 0], color_im[..., 1], color_im[..., 2] = color
+        canvas = mask * (alpha * color_im + (1 - alpha) * canvas) + (1 - mask) * canvas
+
+    return Image.fromarray(np.clip(canvas, 0, 255).astype(np.uint8))
+
 # ---------------------------- VAE for segmentation ----------------------------
-# ถอดรหัส <seg###> 16 ตัว (codebook indices) → mask ขนาด 64x64 ด้วย PyTorch (CPU)
 def _load_vae_npz_local() -> Optional[np.ndarray]:
     try:
         local = os.path.join(os.path.dirname(__file__), "vae-oid.npz")
         if os.path.exists(local):
             return np.load(local)
-
-        # ดึงจาก Space ทางการ (ต้องระบุ repo_type="space")
         path = hf_hub_download(
             repo_id="big-vision/paligemma-hf",
             filename="vae-oid.npz",
@@ -134,7 +207,6 @@ def _load_vae_npz_local() -> Optional[np.ndarray]:
         )
         return np.load(path)
     except Exception:
-        # fallback: community mirror แบบโมเดลรีโป
         try:
             path = hf_hub_download(
                 repo_id="ndkhanh95/Paligemma",
@@ -148,10 +220,6 @@ def _load_vae_npz_local() -> Optional[np.ndarray]:
             return None
 
 def _decode_masks_pt(code_idx_16: np.ndarray, vae_chk) -> Optional[np.ndarray]:
-    """
-    ถอดรหัสชุดโค้ด (B,16) → mask (B,64,64) โดยเดารูปแบบน้ำหนักจาก shape/bias อัตโนมัติ
-    รองรับทั้ง Flax/PyTorch (และเคสสลับแกนอื่น ๆ)
-    """
     try:
         import torch, torch.nn as nn
         from itertools import permutations
@@ -179,7 +247,6 @@ def _decode_masks_pt(code_idx_16: np.ndarray, vae_chk) -> Optional[np.ndarray]:
         emb = torch.from_numpy(vae_chk["_vq_vae._embedding"]).to(device)
 
         def choose_weight_conv(w_np, bias_len):
-            """หา w ที่เป็น (out,in,kH,kW) โดยให้ out == bias_len และ kH,kW เล็ก"""
             w0 = torch.from_numpy(w_np).to(device)
             best = None
             for p in permutations(range(4)):
@@ -191,7 +258,6 @@ def _decode_masks_pt(code_idx_16: np.ndarray, vae_chk) -> Optional[np.ndarray]:
                         best = (score, wp)
             if best is not None:
                 return best[1]
-            # fallback: เลือก permute ที่ทำให้สองแกนท้ายเล็กที่สุด
             best = None
             for p in permutations(range(4)):
                 wp = w0.permute(*p).contiguous()
@@ -202,7 +268,6 @@ def _decode_masks_pt(code_idx_16: np.ndarray, vae_chk) -> Optional[np.ndarray]:
             return best[1]
 
         def choose_weight_deconv(w_np, bias_len):
-            """หา w ที่เป็น (in,out,kH,kW) โดยให้ out == bias_len และ kH,kW เล็ก"""
             w0 = torch.from_numpy(w_np).to(device)
             best = None
             for p in permutations(range(4)):
@@ -214,7 +279,6 @@ def _decode_masks_pt(code_idx_16: np.ndarray, vae_chk) -> Optional[np.ndarray]:
                         best = (score, wp)
             if best is not None:
                 return best[1]
-            # fallback: แบบเดียวกับ conv
             best = None
             for p in permutations(range(4)):
                 wp = w0.permute(*p).contiguous()
@@ -240,7 +304,6 @@ def _decode_masks_pt(code_idx_16: np.ndarray, vae_chk) -> Optional[np.ndarray]:
             layer.weight.data.copy_(w); layer.bias.data.copy_(b)
             return layer
 
-        # ประกอบดีโค้ดเดอร์
         conv0  = conv_from_npz("decoder.0.weight","decoder.0.bias")
         rb0_0  = conv_from_npz("decoder.2.net.0.weight","decoder.2.net.0.bias")
         rb0_1  = conv_from_npz("decoder.2.net.2.weight","decoder.2.net.2.bias")
@@ -254,13 +317,11 @@ def _decode_masks_pt(code_idx_16: np.ndarray, vae_chk) -> Optional[np.ndarray]:
         de10   = deconv_from_npz("decoder.10.weight","decoder.10.bias")
         conv1  = conv_from_npz("decoder.12.weight","decoder.12.bias")
 
-        # เตรียมโค้ดบุ๊ก → (B,D,4,4)
         idx   = torch.from_numpy(code_idx_16.astype(np.int64)).to(device)  # (B,16)
         quant = emb[idx]                                                   # (B,16,D)
         B, N, D = quant.shape
-        x = quant.view(B, 4, 4, D).permute(0, 3, 1, 2).contiguous()        # (B,D,4,4)
+        x = quant.view(B, 4, 4, D).permute(0, 3, 1, 2).contiguous()
 
-        # forward
         x = torch.relu(conv0(x))
         y = torch.relu(rb0_0(x)); y = torch.relu(rb0_1(y)); y = rb0_2(y); x = x + y
         y = torch.relu(rb1_0(x)); y = torch.relu(rb1_1(y)); y = rb1_2(y); x = x + y
@@ -276,14 +337,13 @@ class PaliGemmaAdapter(VLMAdapter):
     name = "PaliGemma"
     sizes = ["", "google/paligemma-3b-mix-224", "google/paligemma-3b-mix-448"]
     default_prompt = "Answer the question about this image."
-    supports_image_output = True  # มีโหมด detect/segment ที่วาดภาพได้
+    supports_image_output = True
 
     def __init__(self):
         self.processor = None
         self.model = None
         self._repo = None
 
-    # ----------- load (รองรับ gated repo) -----------
     def load(self, size_repo: Optional[str] = None) -> None:
         repo = size_repo or "google/paligemma-3b-mix-224"
         if self.model is not None and self._repo == repo:
@@ -320,14 +380,9 @@ class PaliGemmaAdapter(VLMAdapter):
             )
         self._repo = repo
 
-    # ----------- helpers: parsing outputs -----------
+    # ----------- helpers -----------
     @staticmethod
     def _group_locs_to_boxes(locs: List[Tuple[int, int]], W: int, H: int) -> Tuple[List[List[int]], List[int]]:
-        """
-        รับรายการ locs = [(pos_in_text, value)] สำหรับทุก <loc####>
-        จัดกลุ่มต่อเนื่องทีละ 4 เป็น 1 กล่อง (y0,x0,y1,x1)
-        คืน: boxes (พิกเซล), last_pos_of_quad ต่อกล่อง (ใช้จับคู่ seg ถัดไป)
-        """
         boxes, last_pos = [], []
         locs_sorted = sorted(locs, key=lambda x: x[0])
         for i in range(0, len(locs_sorted) - 3, 4):
@@ -343,28 +398,21 @@ class PaliGemmaAdapter(VLMAdapter):
 
     @staticmethod
     def _assign_labels(text: str, labels: List[str], n_boxes: int) -> List[int]:
-        """
-        พยายามจับคู่ labels กับกล่องด้วยการหาตำแหน่งคำ label ในข้อความ
-        แล้วไล่กำหนด index ให้กล่องตามลำดับ ถ้าหาไม่พอ → เติมแบบวนรอบ
-        """
         hits = []
         for li, lab in enumerate(labels):
             for m in re.finditer(rf"\b{re.escape(lab)}\b", text, flags=re.IGNORECASE):
                 hits.append((m.start(), li))
         hits.sort(key=lambda x: x[0])
-        out = []
-        for _, li in hits:
-            if len(out) >= n_boxes: break
-            out.append(li)
+
+        out = [li for _, li in hits][:n_boxes]
+        i = 0
         while len(out) < n_boxes:
-            out.append(len(out) % max(1, len(labels)))
+            out.append(i % max(1, len(labels)))
+            i += 1
         return out
 
     @staticmethod
     def _collect_seg_codes_after_positions(seg_positions: List[Tuple[int, int]], box_last_pos: List[int]) -> List[Optional[List[int]]]:
-        """
-        จับคู่ seg-16 ต่อกล่อง โดยใช้โทเค็น seg ที่ปรากฏหลังตำแหน่ง loc ตัวสุดท้ายของกล่องนั้น
-        """
         seg_sorted = sorted(seg_positions, key=lambda x: x[0])
         out = []
         start = 0
@@ -382,7 +430,6 @@ class PaliGemmaAdapter(VLMAdapter):
 
     @staticmethod
     def _collect_seg_codes_global(seg_positions: List[Tuple[int, int]], n_boxes: int) -> List[Optional[List[int]]]:
-        """fallback: จัด seg เป็นก้อน ๆ 16 ตัวไปตามลำดับของข้อความ โดยไม่ผูกกับกล่อง"""
         seg_sorted = [idx for _, idx in sorted(seg_positions, key=lambda x: x[0])]
         out, i = [], 0
         for _ in range(n_boxes):
@@ -390,26 +437,57 @@ class PaliGemmaAdapter(VLMAdapter):
             i += 16
         return out
 
+    def _run_single_label(self, image: Image.Image, label: str, max_new_tokens: int = 192):
+        single = f"segment {label}"
+        inputs = self.processor(text=single, images=[image], return_tensors="pt").to(self.model.device)
+        with torch.no_grad():
+            out_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+        txt1 = self.processor.batch_decode(out_ids, skip_special_tokens=True)[0]
+
+        W, H = image.size
+        locs1 = [(m.start(), int(m.group(1))) for m in LOC_TAG.finditer(txt1)]
+        boxes1, last_pos1 = self._group_locs_to_boxes(locs1, W, H)
+
+        masks1 = [None] * len(boxes1)
+        segs1 = [(m.start(), int(m.group(1))) for m in SEG_TAG.finditer(txt1)]
+        if segs1 and boxes1:
+            seg_codes = self._collect_seg_codes_after_positions(segs1, last_pos1)
+            if any(c is not None for c in seg_codes):
+                vae_chk = _load_vae_npz_local()
+                if vae_chk is not None:
+                    need = [c for c in seg_codes if c is not None]
+                    idx_map = [i for i, c in enumerate(seg_codes) if c is not None]
+                    arr = np.stack([np.array(c, dtype=np.int32) for c in need], axis=0)
+                    ms = _decode_masks_pt(arr, vae_chk)
+                    if ms is not None:
+                        for bi, m64 in zip(idx_map, ms):
+                            x0, y0, x1, y1 = boxes1[bi]
+                            hh, ww = max(0, y1 - y0), max(0, x1 - x0)
+                            if hh > 0 and ww > 0:
+                                mm = cv2.resize((m64 * 255).astype(np.uint8), (ww, hh), interpolation=cv2.INTER_LINEAR)
+                                full = np.zeros((H, W), dtype=np.uint8)
+                                full[y0:y1, x0:x1] = mm
+                                masks1[bi] = full
+
+        return boxes1, masks1, txt1
+
     # ----------- inference -----------
-    def infer(
-        self, image: Image.Image, prompt: str, params: Optional[Dict[str, Any]] = None
-    ) -> Tuple[Optional[str], Optional[Image.Image]]:
+    def infer(self, image: Image.Image, prompt: str, params: Optional[Dict[str, Any]] = None) -> Tuple[Optional[str], Optional[Image.Image]]:
         self.load(params.get("size_repo") if params else None)
 
         if image is None:
-            raise gr.Error("Please upload the image ✨")
+            raise gr.Error("กรุณาอัปโหลดรูปก่อนครับ ✨")
         if hasattr(image, "mode") and image.mode not in ("RGB", "L"):
             image = image.convert("RGB")
 
         text_prompt = (prompt or self.default_prompt).strip()
 
-        # ปรับพารามิเตอร์ NMS จาก UI (ถ้ามี)
         apply_nms = (params.get("apply_nms") if params else None)
         if apply_nms is None:
             apply_nms = True
         nms_iou = (params.get("nms_iou") if params else None) or 0.5
 
-        # ------------------ Detection mode ------------------
+        # ------------------ Detection ------------------
         if text_prompt.lower().startswith("detect"):
             det_prompt, labels = _build_prefixed_prompt(text_prompt, "detect", default_label="object")
             inputs = self.processor(text=det_prompt, images=[image], return_tensors="pt").to(self.model.device)
@@ -430,10 +508,9 @@ class PaliGemmaAdapter(VLMAdapter):
             if boxes:
                 out_img = _draw_boxes_keep_all(image, boxes, label_idx, scores, labels)
                 return None, out_img
-            else:
-                return f"[detect] no boxes parsed:\n{txt}", None
+            return f"[detect] no boxes parsed:\n{txt}", None
 
-        # ------------------ Segmentation mode ------------------
+        # ------------------ Segmentation ------------------
         if text_prompt.lower().startswith("segment"):
             seg_prompt, labels = _build_prefixed_prompt(text_prompt, "segment", default_label="object")
             inputs = self.processor(text=seg_prompt, images=[image], return_tensors="pt").to(self.model.device)
@@ -442,37 +519,45 @@ class PaliGemmaAdapter(VLMAdapter):
             txt = self.processor.batch_decode(out_ids, skip_special_tokens=True)[0]
 
             W, H = image.size
-            # loc → boxes
             locs = [(m.start(), int(m.group(1))) for m in LOC_TAG.finditer(txt)]
             boxes, last_pos = self._group_locs_to_boxes(locs, W, H)
 
-            # seg tokens
+            # ----- fallback ต่อคลาสถ้ากล่องน้อยกว่าจำนวน label -----
+            original_n = len(boxes)
+            boxes_all = boxes[:]
+            masks_all = [None] * len(boxes)
+            extra_labels_idx, extra_scores = [], []
+
+            if len(boxes_all) < len(labels):
+                for li, lab in enumerate(labels):
+                    b1, m1, _ = self._run_single_label(image, lab, max_new_tokens=192)
+                    for bb, mm in zip(b1, m1):
+                        boxes_all.append(bb)
+                        masks_all.append(mm)
+                        extra_labels_idx.append(li)
+                        extra_scores.append(0.98)
+
+            # decode masks จากผลหลัก (เฉพาะกล่องหลัก)
             segs = [(m.start(), int(m.group(1))) for m in SEG_TAG.finditer(txt)]
             no_seg_msg = None
             if not segs:
                 no_seg_msg = "[segment] model returned no <seg###> tokens; falling back to boxes."
-
-            # จับคู่ seg-16 ต่อกล่อง
-            seg_codes_per_box = self._collect_seg_codes_after_positions(segs, last_pos) if segs else [None]*len(boxes)
-            if all(c is None for c in seg_codes_per_box) and segs:
-                seg_codes_per_box = self._collect_seg_codes_global(segs, len(boxes))
-
-            # ถอดรหัส mask ทั้งก้อน (ถ้ามีครบ 16)
-            masks: List[Optional[np.ndarray]] = [None] * len(boxes)
-            need_decode = [codes for codes in seg_codes_per_box if codes is not None]
-            idx_map = [i for i, codes in enumerate(seg_codes_per_box) if codes is not None]
+            seg_codes_per_box = self._collect_seg_codes_after_positions(segs, last_pos) if segs else [None]*original_n
+            if all(c is None for c in seg_codes_per_box[:original_n]) and segs:
+                seg_codes_per_box = self._collect_seg_codes_global(segs, original_n)
+            need_decode = [codes for codes in seg_codes_per_box[:original_n] if codes is not None]
+            idx_map = [i for i, codes in enumerate(seg_codes_per_box[:original_n]) if codes is not None]
             vae_problem_msg = None
             if need_decode:
                 vae_chk = _load_vae_npz_local()
                 if vae_chk is None:
                     vae_problem_msg = "[segment] VAE weights not available; showing bboxes only."
                 else:
-                    arr = np.stack([np.array(codes, dtype=np.int32) for codes in need_decode], axis=0)  # (B,16)
-                    ms = _decode_masks_pt(arr, vae_chk)  # (B,64,64) หรือ None
+                    arr = np.stack([np.array(codes, dtype=np.int32) for codes in need_decode], axis=0)
+                    ms = _decode_masks_pt(arr, vae_chk)
                     if ms is None:
                         vae_problem_msg = "[segment] VAE decode failed; showing bboxes only."
                     else:
-                        # วางแมสก์ตามขนาดกล่อง
                         for bx_i, m64 in zip(idx_map, ms):
                             x0, y0, x1, y1 = boxes[bx_i]
                             hh, ww = max(0, y1 - y0), max(0, x1 - x0)
@@ -480,28 +565,35 @@ class PaliGemmaAdapter(VLMAdapter):
                                 mm = cv2.resize((m64 * 255).astype(np.uint8), (ww, hh), interpolation=cv2.INTER_LINEAR)
                                 full = np.zeros((H, W), dtype=np.uint8)
                                 full[y0:y1, x0:x1] = mm
-                                masks[bx_i] = full
+                                masks_all[bx_i] = full
 
-            # ไฮไลต์ภาพด้วย mask (ถ้ามี)
-            overlay = np.array(image).copy()
-            used_mask = False
-            for m in masks:
-                if m is None:
-                    continue
-                used_mask = True
-                overlay[m > 127, 1] = np.clip(overlay[m > 127, 1].astype(np.int32) + 60, 0, 255).astype(np.uint8)
-            if used_mask:
-                image = Image.fromarray(overlay)
+            # labels & scores
+            label_idx_main = self._assign_labels(txt, labels, original_n)
+            scores_main = [0.99] * original_n
+            label_idx_all = label_idx_main + extra_labels_idx
+            scores_all = scores_main + extra_scores
 
-            # วาดกรอบ + ป้าย (พร้อม NMS per-class ถ้าเปิดใช้)
-            label_idx = self._assign_labels(txt, labels, len(boxes))
-            scores = [0.99] * len(boxes)
+            # source flags สำหรับ dedup ข้ามคลาส
+            source_flags = (["main"] * original_n) + (["fallback"] * len(extra_labels_idx))
 
-            if apply_nms and boxes:
-                boxes, label_idx, scores = _nms_per_class(boxes, label_idx, scores, nms_iou)
+            # --- dedup ข้ามคลาสก่อน NMS ต่อคลาส ---
+            boxes_all, label_idx_all, scores_all, source_flags, keep_ids = _dedup_across_labels(
+                boxes_all, label_idx_all, scores_all, source_flags, iou_thr=0.85, return_indices=True
+            )
+            masks_all = [masks_all[i] for i in keep_ids]
 
-            if boxes:
-                out_img = _draw_boxes_keep_all(image, boxes, label_idx, scores, labels)
+            # --- per-class NMS ---
+            if apply_nms and boxes_all:
+                b_kept, l_kept, s_kept, keep_ids = _nms_per_class(
+                    boxes_all, label_idx_all, scores_all, nms_iou, return_indices=True
+                )
+                boxes_all, label_idx_all, scores_all = b_kept, l_kept, s_kept
+                masks_all = [masks_all[i] for i in keep_ids]
+
+            # overlay mask แล้วค่อยวาดกรอบ
+            image_overlay = _overlay_colored_masks(image, masks_all, label_idx_all, alpha=0.40)
+            if boxes_all:
+                out_img = _draw_boxes_keep_all(image_overlay, boxes_all, label_idx_all, scores_all, labels)
                 msg = None
                 if no_seg_msg and vae_problem_msg:
                     msg = no_seg_msg + " " + vae_problem_msg
@@ -510,10 +602,9 @@ class PaliGemmaAdapter(VLMAdapter):
                 elif vae_problem_msg:
                     msg = vae_problem_msg
                 return msg, out_img
-            else:
-                return f"[segment] no boxes/masks parsed:\n{txt}", None
+            return f"[segment] no boxes/masks parsed:\n{txt}", None
 
-        # ------------------ QA / Captioning (ปกติ) ------------------
+        # ------------------ QA / Caption ------------------
         inputs = self.processor(text=text_prompt, images=[image], return_tensors="pt").to(self.model.device)
         with torch.no_grad():
             out_ids = self.model.generate(**inputs, max_new_tokens=192, do_sample=False)
