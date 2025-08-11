@@ -4,10 +4,10 @@ import gradio as gr
 from core.registry import list_models, get_adapter
 from core.config import DEFAULT_PROMPTS, DEFAULT_SLIDERS
 
-# === จัดกลุ่มโมเดล ===
+# === models grouping ===
 GROUNDING_MODELS = {"OWL-ViT", "GroundingDINO", "PaliGemma"}
 QA_MODELS        = {"BLIP-2", "InstructBLIP", "SmolVLM", "LLaVA", "PaliGemma", "Qwen2-VL"}
-CLASSIFY_MODELS  = {"TinyCLIP"}   # 🆕 กลุ่มใหม่: Classification (Image–Text Matching)
+CLASSIFY_MODELS  = {"TinyCLIP"}   
 
 # mapping model -> size/variant choices
 MODEL_SIZES = {
@@ -54,7 +54,7 @@ with gr.Blocks() as demo:
         image_input = gr.Image(type="pil", label="Input Image")
 
         with gr.Column():
-            # 🆕 มี 3 กลุ่ม
+            # main 3 groups
             model_type = gr.Radio(
                 choices=["Grounding", "QA (Text)", "Classification"],
                 value="QA (Text)",
@@ -67,7 +67,6 @@ with gr.Blocks() as demo:
                 label="Model"
             )
 
-            # 🆕 dropdown ที่พิมพ์เองได้
             size_dd = gr.Dropdown(
                 label="Model Size / Variant",
                 choices=MODEL_SIZES.get(models_for_type("QA (Text)")[0], []),

@@ -5,7 +5,7 @@ import torch
 from transformers import (
     AutoConfig, AutoTokenizer, AutoProcessor, AutoModelForVision2Seq
 )
-# พยายาม import คลาสเฉพาะรุ่น ถ้าไม่มีจะ fallback เป็น AutoModelForVision2Seq
+
 try:
     from transformers import Qwen2VLForConditionalGeneration
 except Exception:
@@ -42,7 +42,7 @@ class Qwen2VLAdapter(VLMAdapter):
         self.tokenizer = AutoTokenizer.from_pretrained(repo, use_fast=True)
         self.processor = AutoProcessor.from_pretrained(repo)
 
-        # เลือกคลาสตามสถาปัตยกรรม
+        # select classes by structures
         if cfg.model_type == "qwen2_5_vl" and Qwen2_5_VLForConditionalGeneration:
             self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 repo, torch_dtype="auto", device_map="auto"
@@ -52,7 +52,6 @@ class Qwen2VLAdapter(VLMAdapter):
                 repo, torch_dtype="auto", device_map="auto"
             )
         else:
-            # กันเหนียว: ให้ Auto จับคลาสให้เอง
             self.model = AutoModelForVision2Seq.from_pretrained(
                 repo, torch_dtype="auto", device_map="auto"
             )
@@ -64,7 +63,7 @@ class Qwen2VLAdapter(VLMAdapter):
         messages = [{
             "role": "user",
             "content": [
-                {"type": "image", "image": image},             # ✅ แนบรูปจริง
+                {"type": "image", "image": image},             
                 {"type": "text", "text": prompt or "Describe this image."}
             ],
         }]
@@ -73,7 +72,7 @@ class Qwen2VLAdapter(VLMAdapter):
             messages, tokenize=False, add_generation_prompt=True
         )
 
-        # ✅ รองรับทั้ง tuple และ dict จาก qwen_vl_utils
+        # supports both tuple and dict from qwen_vl_utils
         res = process_vision_info(messages)
         if isinstance(res, tuple):
             vision_images, vision_videos = res
@@ -90,6 +89,6 @@ class Qwen2VLAdapter(VLMAdapter):
         ).to(self.model.device)
 
         with torch.no_grad():
-            output_ids = self.model.generate(**inputs, max_new_tokens=192)  # ลดนิดให้เบาลง
+            output_ids = self.model.generate(**inputs, max_new_tokens=192)  
         output_text = self.processor.batch_decode(output_ids, skip_special_tokens=True)[0]
         return output_text, None
