@@ -1,6 +1,6 @@
-# VLM Inference 
+# VLM Exploration 
 
-Single Responsibility Principle refactor of your VLM Gradio app.
+VLM tester via Gradio webapp
 
 ## Structure
 ```
