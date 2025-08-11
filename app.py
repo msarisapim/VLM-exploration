@@ -1,4 +1,4 @@
-# app.py (เฉพาะส่วนที่ต่างจากเดิมของผม)
+# app.py 
 
 import gradio as gr
 from core.registry import list_models, get_adapter
