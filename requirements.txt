@@ -1,0 +1,9 @@
+gradio
+pillow
+numpy
+opencv-python
+torch
+transformers>=4.41
+accelerate
+sentencepiece
+torchvision
