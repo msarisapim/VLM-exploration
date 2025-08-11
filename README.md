@@ -84,3 +84,26 @@ e.g. segment cat; dog
 2. Register it in core/registry.py.
 
 3. (Optional) Add its size/variant options to MODEL_SIZES in app.py.
+
+
+## License
+
+**Code:** MIT (see [LICENSE](./LICENSE)).
+
+**Models & weights:** Not included and governed by their own licenses/terms on Hugging Face or upstream repos.  
+Before downloading or using any model, please review and accept its license. Some models are **gated** and require access approval and/or authentication (e.g., `google/paligemma-3b-mix-224` / `-448`). You must comply with all third-party model/data licenses.
+
+**Notes**
+- This app downloads weights at runtime; distribution of those weights is not part of this repository.
+- By using the app, you agree to the licenses of any third-party models you select.
+
+
+### Third-party models (examples)
+- Salesforce/BLIP-2 variants (QA/Caption)
+- llava-hf/LLaVA-1.5 (QA/Caption)
+- HuggingFaceTB/SmolVLM-Instruct (QA/Caption; CPU-friendly)
+- google/owlvit-base-patch32 (Grounding)
+- IDEA-Research/grounding-dino-base (Grounding)
+- wkcn/TinyCLIP-* (Classification)
+- google/paligemma-3b-mix-224 / -448 (QA/Caption/Detect/Segment; gated)
+- Qwen/Qwen2-VL / Qwen2.5-VL Instruct (QA/Caption)
