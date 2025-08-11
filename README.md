@@ -1,4 +1,4 @@
-# VLM Inference (SRP Refactor)
+# VLM Inference 
 
 Single Responsibility Principle refactor of your VLM Gradio app.
 
@@ -20,6 +20,7 @@ vlm_app_srp/
       owlvit.py
       tinyclip.py
       groundingdino.py
+      etc..
 ```
 
 ## Run
