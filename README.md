@@ -86,6 +86,31 @@ e.g. segment cat; dog
 3. (Optional) Add its size/variant options to MODEL_SIZES in app.py.
 
 
+## Supported devices
+
+This app uses `device_map="auto"` and FP16 where possible.
+
+**NVIDIA (CUDA)**
+- ✅ 8 GB (e.g., RTX 3060 Ti): TinyCLIP, OWL-ViT, GroundingDINO, SmolVLM (CPU), BLIP-2 OPT-2.7B, PaliGemma-3B-224 are comfortable.
+- ⚠️ Borderline on 8 GB: PaliGemma-3B-448, LLaVA-1.5-7B, Qwen2.5-VL-3B — use CPU offload / smaller variants / 224 inputs.
+- ❌ Typically too large for 8 GB: Qwen2-/2.5-VL-7B (needs ≥14–16 GB or heavy offload).
+
+**Apple Silicon (M-series via MPS)**
+- Works for BLIP-2, PaliGemma, OWL-ViT, GroundingDINO, TinyCLIP.
+- 7B chat VLMs run but are slower; prefer smaller variants and 224px inputs.
+
+**AMD (ROCm on Linux)**
+- Many models work on recent ROCm; Windows ROCm is not supported.
+
+**CPU-only**
+- TinyCLIP and SmolVLM are OK; others are slow.
+
+### Low-VRAM tips
+- Prefer 224px checkpoints (e.g. `google/paligemma-3b-mix-224`).
+- Keep batch size = 1; lower `max_new_tokens` for text models.
+- Install `accelerate` and enable CPU offload if needed.
+- On Windows, try: `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128`.
+
 ## License
 
 **Code:** MIT (see [LICENSE](./LICENSE)).
