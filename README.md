@@ -1,6 +1,6 @@
 # VLM Exploration 
 
-Quick all-in-one Vision Language Model (VLM) inference tool (QA/Caption, Grounding/Detect, Segment, Classification) via Gradio UI
+Easy all-in-one Vision Language Model (VLM) inference tool via Gradio UI — supports QA/Captioning, Grounding/Detection, Segmentation, and Classification via a Gradio UI. Quickly check if your dataset style is compatible with various models, and easily add new models by placing them in the core/adapters/ folders.
 
 <img width="1288" height="942" alt="image" src="https://github.com/user-attachments/assets/7288efa9-1362-4fca-8b09-9bc1987018b8" />
 
